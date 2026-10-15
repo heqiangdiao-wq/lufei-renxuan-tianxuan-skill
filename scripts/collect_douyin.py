@@ -335,6 +335,9 @@ def main():
         return
 
     done = 0
+    # 连续「拿不到详情」计数：用于区分「单条视频已失效」与「真风控」
+    # 若不做区分，一条被删除的视频会导致每一轮都在第 1 条 break，整条流水线卡死
+    consec_fail = 0
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -352,9 +355,16 @@ def main():
             print(f"\n▶ [{done}/{limit}] {vid}")
             aw, raw = fetch_detail(page, vid)
             if not aw:
-                print("  ⛔ 未拿到数据 —— 判定被风控或视频不存在，**立即停止**（不硬重试）")
+                consec_fail += 1
                 upsert(reg, vid, platform="douyin", status="blocked")
-                break
+                print(f"  ⛔ 未拿到数据（连续第 {consec_fail} 次）—— 可能风控，也可能该视频已失效")
+                if consec_fail >= 2:
+                    print("  ⛔ 连续 2 次拿不到数据 —— 判定被风控，**立即停止整轮**（不硬重试）")
+                    break
+                print("  → 判定为单条异常，跳过它继续下一条")
+                time.sleep(random.randint(10, 20))
+                continue
+            consec_fail = 0
 
             title = str(aw.get("desc") or "")[:50].replace("\n", " ")
             author = (aw.get("author") or {}).get("nickname")

@@ -105,11 +105,15 @@ def load_terms(path=TERMS):
         return items
     try:
         import yaml
-        data = yaml.safe_load(open(path, encoding="utf-8"))
-        for t in (data or {}).get("core_terms", []):
+        data = yaml.safe_load(open(path, encoding="utf-8")) or {}
+        # 兼容两种顶层键名（core_terms / terms）。
+        # ⚠️ 曾因键名不一致导致**术语表静默失效**：yaml 解析成功、不抛异常，
+        #    于是不会走下面的 fallback 文本解析，结果载入 0 条、错字一个都没修。
+        for t in (data.get("core_terms") or data.get("terms") or []):
             items.append({"correct": t.get("correct"),
                           "wrong": t.get("wrong") or [],
-                          "source": t.get("source", "")})
+                          "source": t.get("source", ""),
+                          "confidence": t.get("confidence", "")})
     except Exception:
         txt = open(path, encoding="utf-8").read()
         for blk in txt.split("- correct:")[1:]:
@@ -126,15 +130,25 @@ def load_terms(path=TERMS):
 
 
 def apply_terms(text, terms):
+    """只替换**高置信度**术语，返回 (清洗后文本, 替换记录)。
+
+    ⚠️ `confidence: guess` 的条目不自动替换 —— 纯字符串替换分不清词边界，
+    例如「味[道跟]那个不一样」里的「道跟」跨了「味道 + 跟」两个词，
+    替换成「道痕」就是误伤。这类低置信词交给人工确认，不自动动手。
+    """
     corr = []
     for t in terms:
+        conf = (t.get("confidence") or "").lower()
+        if conf == "guess":
+            continue
         for w in t["wrong"]:
             if not w or w not in text:
                 continue
             n = text.count(w)
             text = text.replace(w, t["correct"])
             corr.append({"from": w, "to": t["correct"], "count": n,
-                         "confidence": "verified" if t.get("source") != "guess" else "guess"})
+                         "confidence": "verified" if conf == "verified"
+                                       else ("guess" if t.get("source") == "guess" else "verified")})
     return text, corr
 
 
