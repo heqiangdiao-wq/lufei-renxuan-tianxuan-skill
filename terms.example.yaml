@@ -1,0 +1,59 @@
+# 术语校正表 · 模板
+#
+# 复制到 state/terms.yaml 后按自己的语料修改。
+# 这张表是整条清洗流水线的核心：ASR 对专有名词会**系统性**出错，
+# 不校正的话语料会一路污染到最终输出的文字稿里。
+#
+# 它同时要处理两类问题：
+#   ① ASR 同音错字   —— 语音模型没见过该词，按发音猜了个常见字
+#                        （实测「路飞」被识别成「陆菲」，7 次无一正确）
+#   ② 源文本自带错字 —— 第三方整理的文稿可能有系统性用字错误
+#                        （实测整理稿把「贪婪」全写成「贪梦」，46 次 vs 27 次）
+#
+# 字段说明：
+#   correct   : 正确写法
+#   wrong     : 需要被替换掉的错误写法（可多个）
+#   confidence: verified（有实证依据，可自动替换）/ guess（推测，建议人工确认）
+#   source    : author_book / asr_observed / guess
+#   note      : 说明与依据（便于日后复核，不要省）
+#
+# ⚠️ 重要：**纯字符串替换会误伤**。实测把「味[道跟]那个不一样」错改成
+#    「味[道痕]那个不一样」——「道跟」跨了两个词（味道 + 跟）。
+#    因此：高置信度、且不会跨词边界的词才设 verified；有歧义的一律 guess。
+
+core_terms:
+
+  # ---------- 专有名词（ASR 最容易错的一类）----------
+  - correct: 路飞
+    wrong: [陆菲, 陆飞]
+    confidence: verified
+    source: asr_observed
+    note: "作者网名。语音模型不认识该词，实测 7 次全部错成「陆菲」"
+
+  - correct: 人选天选论
+    wrong: [人选天远论, 人选天选轮]
+    confidence: verified
+    source: asr_observed
+    note: "作品名。ASR 会把「选」听成「远」"
+
+  # ---------- 书中被整理稿写错的用字 ----------
+  - correct: 贪婪
+    wrong: [贪梦, 贪蓝, 贪懒]
+    confidence: verified
+    source: author_book
+    note: "整理稿系统性写成「贪梦」（46 次），而作者原声说的是「贪婪」（5 次）。
+           书中标准对举是「贪婪=想拿，恐惧=退缩」，故只能是「贪婪」。"
+
+  # ---------- 普通同音错词（最容易漏的一类）----------
+  - correct: 戒掉
+    wrong: [借掉]
+    confidence: verified
+    source: guess
+    note: "「借掉香烟」不通，应为「戒掉」。这类普通词最容易被忽略"
+
+  # ---------- 存疑项：标 guess，交人工确认 ----------
+  # - correct: 示例
+  #   wrong: [示例错字]
+  #   confidence: guess
+  #   source: guess
+  #   note: "仅在某语境下成立，需人工判断"

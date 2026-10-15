@@ -1,0 +1,62 @@
+# ==========================================================
+# 本仓库只收录「工具与方法」，不收录「素材与语料」。
+# 下面这些是本地私有数据，原因见 README「为什么不收录素材」一节。
+# ==========================================================
+
+# ---------- 登录态（安全敏感，含 cookie，绝不公开）----------
+state/dy_profile/
+state/dy_profile_info.json
+*Cookies*
+*Login Data*
+
+# ---------- 原始素材（版权属原作者，不随仓库分发）----------
+corpus/book/
+corpus/chapters_html/
+corpus/audio/
+corpus/transcripts/
+corpus/processed/
+corpus/clean/
+
+# ---------- 采集状态与素材池（含平台 ID、清单、登记表）----------
+state/douyin_videos.jsonl
+state/douyin_ids.txt
+state/douyin_long_ids.txt
+state/real_uids.txt
+state/sec_uids.txt
+state/related_seeds_done.txt
+state/userpage_done.txt
+state/registry.*.jsonl
+state/retry_*.txt
+state/collect_douyin.lock
+state/*.lock
+state/terms.yaml
+
+# ---------- 本地临时/一次性文件 ----------
+_lufei_backup/
+scripts/_lock_worker.py
+
+# ---------- 工具的项目数据（工作记忆、定时任务配置，含内部信息）----------
+.workbuddy/
+
+# ---------- 模型权重与工具二进制 ----------
+_probe/
+*.bin
+*.exe
+
+# ---------- 音视频中间产物 ----------
+*.wav
+*.mp4
+*.m4a
+*.mp3
+*.flac
+
+# ---------- 通用 ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
