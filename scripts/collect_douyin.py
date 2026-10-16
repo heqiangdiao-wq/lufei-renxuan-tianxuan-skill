@@ -1,11 +1,23 @@
-"""抖音采集（低频 · 限条数 · 断点续传）
+"""抖音采集（低频 · 限条数 · 时间预算 · 断点续传）
 
-与 B站共用同一张登记表 state/registry.jsonl，所以两边不会互相重复。
-风控对策（基于 2026-10-13 实测：连续第 4 次访问就被拦）：
+风控对策（实测结论）：
   * 单次会话默认只跑 3 条（--limit）
   * 每条之间随机间隔 45~90 秒（--gap-min / --gap-max）
-  * 一旦页面返回空数据（"视频数据加载中"），判定被风控 —— 立刻停止，不硬重试
-  * 已完成的跳过，可随时重跑接着来
+  * 单条拿不到数据 → 跳过继续；**连续 2 次**才判风控停轮
+    （区分「视频已失效」与「真风控」，否则一条被删的视频会卡死每一轮）
+  * 已有音轨（wav）时跳过下载 mp4，直接进转录
+  * 已完成的跳过，幂等，可随时重跑接着来
+
+时间预算（--budget-min）：
+  定时任务每小时触发一次。若只用 --limit，短视频跑完 5 条约 25 分钟，
+  剩下 35 分钟整个空转，利用率仅约一半 —— 而转录是纯 CPU 瓶颈，空转就是纯浪费。
+  用 --budget-min 55 可让每轮跑满窗口，吞吐接近翻倍。
+
+并行转录（--parallel）：
+  实测单个转录只用 37% CPU（约 4.4 / 12 核），并行 2 个时 CPU 升到 69.8%，
+  处理同样音频 288s → 192s，即**吞吐提升约 1.5 倍**。
+  详情获取与下载仍保持串行（Playwright 共用一个 page，且并发访问抖音更易触发风控）。
+  注意：并行按倍数放大内存需求，门控会自动按 MIN_FREE_GB × parallel 判断。
 
 流程：
   Playwright 开详情页 -> 拦 aweme/detail -> 取最低码率 play_addr
@@ -14,9 +26,11 @@
 用法：
   python collect_douyin.py 7593565968472757625 7615417598855039018
   python collect_douyin.py --ids-file ids.txt --limit 3
+  python collect_douyin.py --ids-file ids.txt --limit 500 --budget-min 55
   python collect_douyin.py --status
 """
 import os, sys, json, re, time, random, subprocess, datetime, shutil
+from concurrent.futures import ThreadPoolExecutor
 
 
 def _which_dir(name, fallback_dir):
@@ -202,6 +216,33 @@ def transcribe(audio, vid, aw):
     return None
 
 
+# ---------------- 并行转录的任务结算 ----------------
+def reap_transcribed(inflight, reg, keep_media):
+    """结算已完成的转录任务（写登记表 + 清理中间产物），未完成的原样返回。
+
+    设计要点：转录在线程池里跑（纯 CPU），但**登记与清理只在主线程做** ——
+    registry 是「读-改-写」模式，并发写会互相覆盖（2026-10-15 踩过：
+    两个采集进程同时写导致 18 条记录丢失）。
+    """
+    remain = []
+    for it in inflight:
+        if not it["fut"].done():
+            remain.append(it)
+            continue
+        tj = it["fut"].result()
+        vid = it["vid"]
+        if tj:
+            upsert(reg, vid, status="transcribed",
+                   transcript=os.path.relpath(tj, ROOT))
+            print(f"  ✅ 转录完成 -> {os.path.relpath(tj, ROOT)}")
+            if not keep_media:
+                _try_remove(it["wav"])        # 音频中间产物用完即回收
+        else:
+            upsert(reg, vid, status="failed", stage="transcribe")
+            print(f"  ✗ 转录失败 {vid}")
+    return remain
+
+
 # ---------------- 进程锁 ----------------
 # 全天连续跑时定时任务可能重叠触发，若无锁保护，两个进程会同时下载同一条视频。
 LOCK = os.path.join(ROOT, "state", "collect_douyin.lock")
@@ -277,28 +318,18 @@ def main():
     except Exception:
         pass
 
-    avail = avail_mem_gb()
-    if avail < MIN_FREE_GB:
-        # 内存是波动的（用户开/关应用、浏览器回收标签都会变），
-        # 直接跳过会让任务永远跑不动 → 等一小会儿，抓住内存释放的窗口
-        print(f"⏳ 可用内存 {avail:.1f} GB（需 ≥{MIN_FREE_GB} GB），等待最多 {MEM_WAIT_SEC//60} 分钟 ...",
-              flush=True)
-        waited = 0
-        while waited < MEM_WAIT_SEC:
-            time.sleep(30)
-            waited += 30
-            avail = avail_mem_gb()
-            if avail >= MIN_FREE_GB:
-                break
-            if waited % 120 == 0:
-                print(f"   ... 已等 {waited}s，当前 {avail:.1f} GB", flush=True)
-        if avail < MIN_FREE_GB:
-            print(f"⚠️ 等待后仍只有 {avail:.1f} GB，本次跳过。"
-                  f"建议关闭部分应用（ChatGPT / 飞书 / 多余浏览器）后等下一次触发。")
-            return
-        print(f"✅ 内存已释放到 {avail:.1f} GB，继续采集", flush=True)
-
+    # ---- 参数解析 ----
+    # ⚠️ 必须在内存门控**之前**：门控要用 parallel 计算内存需求，
+    #    否则会 UnboundLocalError（2026-10-15 实际踩到：加 --parallel 时把解析
+    #    留在了门控后面，脚本启动即崩）。
     limit, gap_min, gap_max = 3, 45, 90
+    budget_min = 0        # >0 时表示「跑满 N 分钟就优雅退出」。
+                          # 用途：定时任务每小时触发一次，若只靠 --limit，
+                          # 短视频跑完几条只需约 25 分钟，剩下 35 分钟整个空转，
+                          # 利用率只有约一半。用时间预算可让每轮跑满窗口。
+    parallel = 1          # 并行转录数。实测单个转录只用 37% CPU（约 4.4/12 核），
+                          # 并行 2 个时 CPU 升到 69.8%，处理同样音频 288s → 192s，
+                          # 即吞吐提升约 1.5 倍。1 = 串行（与旧版行为一致）。
     keep_media = "--keep-media" in args      # 默认清理中间产物（磁盘约束），加此参数可保留
     ids = []
     i = 0
@@ -306,6 +337,10 @@ def main():
         a = args[i]
         if a == "--limit":
             limit = int(args[i + 1]); i += 2
+        elif a == "--budget-min":
+            budget_min = int(args[i + 1]); i += 2
+        elif a == "--parallel":
+            parallel = max(1, int(args[i + 1])); i += 2
         elif a == "--gap-min":
             gap_min = int(args[i + 1]); i += 2
         elif a == "--gap-max":
@@ -316,6 +351,37 @@ def main():
             i += 2
         else:
             ids.append(a); i += 1
+
+    # ---- 内存门控 ----
+    avail = avail_mem_gb()
+    # 内存不足以支撑并行时，**自动降为串行**，而不是整轮跳过 ——
+    # 跳过等于完全空转（2026-10-16 实测：白天内存被占满后，采集直接停了 1.5 小时）；
+    # 降级只是吞吐减半，仍能持续推进，性价比高得多。
+    while parallel > 1 and avail < MIN_FREE_GB * parallel:
+        parallel -= 1
+        print(f"⚠️ 可用内存 {avail:.1f} GB 不足以跑并行，本轮并行数自动降为 {parallel}",
+              flush=True)
+    # 并行转录时每个转录进程都要各自加载一份模型，内存需求按并行数放大
+    need_gb = MIN_FREE_GB * parallel
+    if avail < need_gb:
+        # 内存是波动的（用户开/关应用、浏览器回收标签都会变），
+        # 直接跳过会让任务永远跑不动 → 等一小会儿，抓住内存释放的窗口
+        print(f"⏳ 可用内存 {avail:.1f} GB（并行 {parallel} 需 ≥{need_gb:.1f} GB），"
+              f"等待最多 {MEM_WAIT_SEC//60} 分钟 ...", flush=True)
+        waited = 0
+        while waited < MEM_WAIT_SEC:
+            time.sleep(30)
+            waited += 30
+            avail = avail_mem_gb()
+            if avail >= need_gb:
+                break
+            if waited % 120 == 0:
+                print(f"   ... 已等 {waited}s，当前 {avail:.1f} GB", flush=True)
+        if avail < need_gb:
+            print(f"⚠️ 等待后仍只有 {avail:.1f} GB（并行 {parallel} 需 {need_gb:.1f} GB），本次跳过。"
+                  f"建议关闭部分应用（ChatGPT / 飞书 / 多余浏览器）后等下一次触发。")
+            return
+        print(f"✅ 内存已释放到 {avail:.1f} GB，继续采集", flush=True)
 
     # 从链接里抽 ID
     clean = []
@@ -335,9 +401,24 @@ def main():
         return
 
     done = 0
+    t_start = time.time()          # 时间预算的起点
+    # 时长预估表：用于判断「下一条还塞不塞得进本轮时间预算」。
+    # 只按已用时间判断不够 —— 若最后一条恰好是 100 分钟的长视频，
+    # 单条转录就要 1 小时，会顶穿窗口并占掉下一个定时轮次。
+    est_dur = {}
+    try:
+        for _l in open(os.path.join(PROBE, "douyin_videos.jsonl"), encoding="utf-8"):
+            if _l.strip():
+                _d = json.loads(_l)
+                est_dur[_d.get("id")] = _d.get("duration") or 0
+    except Exception:
+        pass
     # 连续「拿不到详情」计数：用于区分「单条视频已失效」与「真风控」
     # 若不做区分，一条被删除的视频会导致每一轮都在第 1 条 break，整条流水线卡死
     consec_fail = 0
+    # 本轮「因塞不进预算而跳过」的计数：跳过太多时需破例处理，
+    # 否则比单轮窗口还长的条目会被永久跳过、永远采不到
+    skipped_budget = 0
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -347,10 +428,42 @@ def main():
         ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page = ctx.new_page()
 
+        # 转录并行化：详情获取与下载必须**串行**（Playwright 共用一个 page，
+        # 且并发访问抖音更容易触发风控）；但转录是纯 CPU 且单个只用约 4.4/12 核，
+        # 所以把转录丢进线程池并发跑，吞吐可提升约 1.5 倍。
+        pool = ThreadPoolExecutor(max_workers=parallel)
+        inflight = []          # 在途转录任务：[{vid, wav, fut, est}]
+
         for vid in todo:
             if done >= limit:
                 print(f"\n已达本次上限 {limit} 条，停止。剩余 {len(todo) - done} 条下次继续。")
                 break
+
+            # 先回收已完成的转录：释放并发槽位，并及早写登记表
+            inflight = reap_transcribed(inflight, reg, keep_media)
+
+            if budget_min:
+                elapsed = (time.time() - t_start) / 60
+                # 在途转录的剩余工作量（按并行数折算成挂钟时间）
+                inflight_min = sum(it["est"] for it in inflight) / max(1, parallel)
+                # 预估下一条的转录耗时（音频分钟 × 0.6 实测倍率）
+                est_next = est_dur.get(vid, 0) / 60 * 0.6
+                remaining = budget_min - elapsed - inflight_min
+                # done >= 1 的保护：避免第 1 条就超出预算时每轮什么都不跑（死循环）
+                if done >= 1 and est_next > remaining:
+                    skipped_budget += 1
+                    if skipped_budget > 60:
+                        # 连续跳过太多 —— 说明剩下的条目都比本轮剩余时间还长。
+                        # 此时**破例处理当前条**，否则比单轮窗口还长的条目会被永久跳过。
+                        print(f"  ⚠️ 已跳过 {skipped_budget - 1} 条，破例处理本条（可能超出本轮预算）")
+                        skipped_budget = 0
+                    else:
+                        # 不立即收工：清单大体按音频时长升序，后面通常有更短的条目，
+                        # 跳过当前这条继续试，把窗口填满
+                        # （首轮实测：直接停会在 50 分钟预算里只用 37 分钟，白浪费 13 分钟）
+                        print(f"  ⏭ 预估 {est_next:.0f} 分 > 本轮剩余 {remaining:.0f} 分，"
+                              f"跳过本条、试后面的")
+                        continue
             done += 1          # 先计数：即使中途失败也占一个名额，避免 limit 失效后无限跑
             print(f"\n▶ [{done}/{limit}] {vid}")
             aw, raw = fetch_detail(page, vid)
@@ -398,21 +511,33 @@ def main():
                     upsert(reg, vid, status="failed", stage="extract_audio")
                     continue
 
-            tj = transcribe(wav, vid, aw)
-            if not tj:
-                upsert(reg, vid, status="failed", stage="transcribe")
-                continue
-            upsert(reg, vid, status="transcribed",
-                   transcript=os.path.relpath(tj, ROOT))
-            print(f"  ✅ 转录完成 -> {os.path.relpath(tj, ROOT)}")
-            if not keep_media:          # 转录完成，音频中间产物即可清理
-                _try_remove(wav)
+            # 提交到线程池（不阻塞）。登记与中间产物清理都在 reap_transcribed 里
+            # 由**主线程**完成 —— registry 的读-改-写不是并发安全的。
+            fut = pool.submit(transcribe, wav, vid, aw)
+            inflight.append({"vid": vid, "wav": wav, "fut": fut,
+                             "est": est_dur.get(vid, 0) / 60 * 0.6})
+            print(f"  ⏳ 已提交转录（在途 {len(inflight)}/{parallel}）")
+
+            # 并发槽位占满则等待 —— 避免一次性把太多音频堆在磁盘上
+            while len(inflight) >= parallel:
+                inflight = reap_transcribed(inflight, reg, keep_media)
+                if len(inflight) >= parallel:
+                    time.sleep(3)
 
             if done < limit:
                 wait = random.randint(gap_min, gap_max)
                 print(f"  ⏳ 低频等待 {wait} 秒（避免触发风控）...")
                 time.sleep(wait)
 
+        # 收尾：等所有在途转录完成（不等会丢结果）
+        if inflight:
+            print(f"\n⏳ 等待 {len(inflight)} 个在途转录完成 ...")
+            while inflight:
+                inflight = reap_transcribed(inflight, reg, keep_media)
+                if inflight:
+                    time.sleep(5)
+
+        pool.shutdown(wait=True)
         browser.close()
 
     print(f"\n本次完成 {done} 条")
