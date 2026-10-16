@@ -20,8 +20,11 @@ import os, sys, shutil, time, glob
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.join(ROOT, "state")
 # 备份目录刻意放在**项目目录之外**（项目内目录可能被清理机制误删）
-# 默认取项目上一级的 _lufei_backup，可用环境变量 LUFEI_BACKUP 覆盖
-BACKUP_ROOT = os.environ.get("LUFEI_BACKUP") or os.path.join(os.path.dirname(ROOT), "_lufei_backup")
+# 注意：不能再用「项目上一级」，项目一旦被挪进带时间戳的父目录（如
+# D:\workbuddy\2026-08-17-10-53-06\），默认值会漂移、与历史备份割裂。
+# 因此钉死为固定绝对路径，仍可用环境变量 LUFEI_BACKUP 覆盖。
+DEFAULT_BACKUP_ROOT = r"D:\workbuddy\_lufei_backup"
+BACKUP_ROOT = os.environ.get("LUFEI_BACKUP") or DEFAULT_BACKUP_ROOT
 
 KEEP = ["real_uids.txt", "douyin_videos.jsonl", "douyin_ids.txt",
         "douyin_long_ids.txt", "terms.yaml", "dy_profile_info.json",
