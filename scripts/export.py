@@ -16,7 +16,10 @@ PROC = os.path.join(ROOT, "corpus", "processed")
 CLEAN = os.path.join(ROOT, "corpus", "clean")
 os.makedirs(CLEAN, exist_ok=True)
 
-ORIGIN_LABEL = {"author_voice": "作者原声", "third_party": "第三方解读", "unknown": "来源待确认"}
+ORIGIN_LABEL = {"author_voice": "作者原声",
+                "author_voice_repost": "作者原声·切片号搬运",
+                "third_party": "第三方解读",
+                "unknown": "来源待确认"}
 
 
 def mmss(sec):

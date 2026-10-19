@@ -184,6 +184,40 @@ def merge_segments(segs, gap_sentence=0.45, max_chars=70):
     return out
 
 
+# ---------------- 来源判定 ----------------
+# 关键：origin 描述的是「**说话人是谁**」，不是「发布账号是谁」。
+# 这个区分是整个项目的命门 —— 混用会直接导致风格失真。
+#
+#   author_voice         本人/官方号发布的原声
+#   author_voice_repost  第三方账号搬运的**他本人原声**（抖音切片号主体）
+#   third_party          他人转述、解说、评论他的观点（说话人不是他）
+#   unknown              账号归属未核实
+#
+# 抖音切片号（「路飞的影子（切片）」「風雪夜歸人「路飛切片」」等）剪的就是
+# 他本人生直播的录音，发布者是第三方但**说话人是他**，因此归 author_voice_repost，
+# 绝不能因为「账号不是官方号」就打成 third_party —— 那会把 92% 的语料废掉。
+AUTHOR_VOICE_REPOST = "author_voice_repost"
+_SLICE_HINT = ("切片", "路飞", "路飛", "飛哥", "路飞切片")
+
+# 从 ORIGIN_MAP 里学出「已知第三方解说号」名单，跨平台复用。
+# 同一个账号在 B 站被判 third_party，在抖音就不该判成别的 —— 否则同一张嘴两种性质。
+KNOWN_THIRD_PARTY = {a for a, o in ORIGIN_MAP.values() if o == "third_party" and a}
+
+
+def resolve_origin(plat, author, d, mapped_origin):
+    """返回 (origin, channel_origin)。channel_origin 留档，便于回溯原始判定。"""
+    raw_origin = d.get("origin") or mapped_origin or "unknown"
+    if plat == "douyin":
+        name = author or ""
+        if name in KNOWN_THIRD_PARTY:
+            return "third_party", raw_origin
+        if any(h in name for h in _SLICE_HINT):
+            return AUTHOR_VOICE_REPOST, raw_origin
+        # 不是切片号、也不是已知解说号 —— 归属不明确，宁可标 unknown 让人复核
+        return "unknown", raw_origin
+    return raw_origin, raw_origin
+
+
 # ---------------- 主处理 ----------------
 def process_file(path, terms):
     d = json.load(open(path, encoding="utf-8"))
@@ -193,7 +227,7 @@ def process_file(path, terms):
     plat = d.get("platform", "bilibili")
     mapped_author, mapped_origin = ORIGIN_MAP.get(vid, (None, "unknown"))
     author = d.get("author") or mapped_author
-    origin = d.get("origin") or mapped_origin
+    origin, channel_origin = resolve_origin(plat, author, d, mapped_origin)
     rows, ncorr = [], 0
     for i, m in enumerate(merged, 1):
         raw = m["text"]
@@ -204,8 +238,9 @@ def process_file(path, terms):
             "source": {
                 "platform": plat,
                 "vid": vid,
-                "author": author,
-                "origin": origin,          # author_voice=作者原声 / third_party=他人解读
+                "author": author,                  # 发布账号（可能是切片号）
+                "origin": origin,                  # 说话人属性（上表四值）
+                "channel_origin": channel_origin,  # 原始判定留档
                 "audio": d.get("audio_path"),
             },
             "time": {"start": round(m["start"], 2), "end": round(m["end"], 2)},
