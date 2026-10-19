@@ -21,6 +21,7 @@ import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROC = os.path.join(ROOT, "corpus", "processed")
+STATE = os.path.join(ROOT, "state")
 DST = os.path.join(ROOT, "corpus", "ALL_FULL.md")
 
 ORIGIN_LABEL = {
@@ -37,7 +38,31 @@ def mmss(sec):
     return f"{sec // 60:02d}:{sec % 60:02d}"
 
 
+def load_titles():
+    """从登记表取真实视频标题。抖音标题含 @ 与话题标签，需清理。"""
+    import re
+    out = {}
+    p = os.path.join(STATE, "registry.douyin.jsonl")
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            for l in f:
+                if not l.strip():
+                    continue
+                r = json.loads(l)
+                t = (r.get("title") or "").strip()
+                t = re.sub(r"@\S+", "", t)
+                t = re.sub(r"#\S+", "", t)
+                t = re.sub(r"\s+", " ", t).strip()
+                if t:
+                    # processed 侧的 vid 带 dy_ 前缀，登记表里是裸 ID，两边都登记
+                    rid = str(r.get("id"))
+                    out[rid] = t
+                    out["dy_" + rid] = t
+    return out
+
+
 def load():
+    titles = load_titles()
     items = []
     for p in sorted(glob.glob(os.path.join(PROC, "*.jsonl"))):
         rows = []
@@ -48,12 +73,14 @@ def load():
         if not rows:
             continue
         src = rows[0].get("source") or {}
+        vid = src.get("vid") or os.path.splitext(os.path.basename(p))[0]
         items.append({
-            "vid": src.get("vid") or os.path.splitext(os.path.basename(p))[0],
+            "vid": vid,
             "platform": src.get("platform") or "?",
             "author": src.get("author") or "未知",
             "origin": src.get("origin") or "unknown",
             "book_ref": rows[0].get("book_ref"),
+            "title": titles.get(vid),
             "rows": rows,
             "chars": sum(r.get("chars", 0) for r in rows),
             "sec": (rows[-1].get("time") or {}).get("end") or 0,
@@ -115,7 +142,7 @@ def main():
         ]
         for it in group:
             idx += 1
-            title = it["book_ref"] or (it["rows"][0].get("clean") or it["vid"])[:24]
+            title = it["book_ref"] or it["title"] or it["vid"]
             out.append(f"## {idx}. {title}")
             out.append("")
             out.append(f"`{it['vid']}` · {it['platform']} · {it['author']} · "
