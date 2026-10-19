@@ -52,8 +52,16 @@ def _load_lines(path):
 
 
 def collect():
-    dy = _load_jsonl(os.path.join(STATE, "registry.douyin.jsonl"))
-    bl = _load_jsonl(os.path.join(STATE, "registry.bilibili.jsonl"))
+    dy_all = _load_jsonl(os.path.join(STATE, "registry.douyin.jsonl"))
+    bl_all = _load_jsonl(os.path.join(STATE, "registry.bilibili.jsonl"))
+
+    # 只把 transcribed 记为「已完成」；failed / skipped 单列，
+    # 否则「已完成」会把放弃的条目也算进去，进度虚高。
+    dy = [r for r in dy_all if r.get("status") == "transcribed"]
+    bl = [r for r in bl_all if r.get("status") == "transcribed"]
+    dy_dropped = len([r for r in dy_all if r.get("status") in ("failed", "skipped")])
+    dropped_ids = {str(r.get("id")) for r in dy_all
+                   if r.get("status") in ("failed", "skipped")}
 
     dy_done = {str(r.get("id")) for r in dy if r.get("id")}
     bl_done = {str(r.get("id")) for r in bl if r.get("id")}
@@ -62,7 +70,9 @@ def collect():
     long_ids = _load_lines(os.path.join(STATE, "douyin_long_ids.txt"))
     long_total = len(long_ids)
     long_done = len([i for i in long_ids if i in dy_done])
-    long_left = long_total - long_done
+    # 已放弃的条目不再算「待采」，否则永远显示还差 2 条
+    long_dropped = len([i for i in long_ids if i in dropped_ids])
+    long_left = long_total - long_done - long_dropped
 
     # 元数据池（短视频候选池）
     pool = _load_jsonl(os.path.join(STATE, "douyin_videos.jsonl"))
@@ -96,6 +106,7 @@ def collect():
     return {
         "gen_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "dy_total": len(dy),
+        "dy_dropped": dy_dropped,
         "dy_long_total": long_total,
         "dy_long_done": long_done,
         "dy_long_left": long_left,
@@ -126,6 +137,7 @@ def render(d):
 | 项 | 数值 |
 |---|---|
 | 已完成登记 | **{d['dy_total']}** 条 |
+| 已放弃（音频反复取不到） | {d['dy_dropped']} 条 |
 | 长视频清单（≥10 分钟 / 完整连麦为主） | {d['dy_long_total']} 条 |
 | ├ 已完成 | {d['dy_long_done']} 条（{pct(d['dy_long_done'], d['dy_long_total'])}） |
 | └ 待采 | **{d['dy_long_left']}** 条 |
