@@ -16,6 +16,11 @@ corpus/audio/
 corpus/transcripts/
 corpus/processed/
 corpus/clean/
+# 合并本与去重报告同样含正文/原句摘录，一律不入库
+corpus/ALL_FULL.md
+corpus/DEDUP_REPORT.md
+corpus/dedup_map.json
+corpus/*.md
 
 # ---------- 采集状态与素材池（含平台 ID、清单、登记表）----------
 state/douyin_videos.jsonl
@@ -30,6 +35,9 @@ state/retry_*.txt
 state/collect_douyin.lock
 state/*.lock
 state/terms.yaml
+state/logs/
+state/*.bak*
+state/*.log
 
 # ---------- 本地临时/一次性文件 ----------
 _lufei_backup/
