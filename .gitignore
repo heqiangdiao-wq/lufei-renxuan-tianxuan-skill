@@ -21,6 +21,9 @@ corpus/ALL_FULL.md
 corpus/DEDUP_REPORT.md
 corpus/dedup_map.json
 corpus/*.md
+# 主题初筛结果含每条素材的视频 ID 与标签
+corpus/*.json
+corpus/*.jsonl
 
 # ---------- 采集状态与素材池（含平台 ID、清单、登记表）----------
 state/douyin_videos.jsonl
@@ -38,6 +41,8 @@ state/terms.yaml
 state/logs/
 state/*.bak*
 state/*.log
+# 来源修正表含视频 ID 与账号名
+state/*.json
 
 # ---------- 本地临时/一次性文件 ----------
 _lufei_backup/
@@ -68,3 +73,6 @@ venv/
 .DS_Store
 Thumbs.db
 *.log
+
+# ---------- L3 主题库（含原话引用与平台 ID，本地私有）----------
+topics/

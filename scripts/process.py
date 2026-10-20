@@ -203,18 +203,37 @@ _SLICE_HINT = ("切片", "路飞", "路飛", "飛哥", "路飞切片")
 # 同一个账号在 B 站被判 third_party，在抖音就不该判成别的 —— 否则同一张嘴两种性质。
 KNOWN_THIRD_PARTY = {a for a, o in ORIGIN_MAP.values() if o == "third_party" and a}
 
+# 由 scripts/fix_origin.py 生成：把「第三方」再拆成
+#   repost_read  他人朗读/复述他的原文（文本可信，但声音不是他）
+#   commentary   他人自己的解读评论（内容不可当作他的观点）
+# 依据：账号名是否含「切片」，以及与原声语料的 4-gram 重合度是否 ≥60%
+_ORIGIN_FIX_PATH = os.path.join(ROOT, "state", "origin_fix.json")
+try:
+    with open(_ORIGIN_FIX_PATH, encoding="utf-8") as _f:
+        ORIGIN_FIX = {k: v["to"] for k, v in json.load(_f).items()}
+except Exception:
+    ORIGIN_FIX = {}
 
-def resolve_origin(plat, author, d, mapped_origin):
+
+def resolve_origin(plat, author, vid, d, mapped_origin):
     """返回 (origin, channel_origin)。channel_origin 留档，便于回溯原始判定。"""
     raw_origin = d.get("origin") or mapped_origin or "unknown"
+    # 修正表优先级最高：它是按「文本与原声重合度」实测出来的，比账号名可靠
+    if vid in ORIGIN_FIX:
+        return ORIGIN_FIX[vid], raw_origin
     if plat == "douyin":
         name = author or ""
         if name in KNOWN_THIRD_PARTY:
-            return "third_party", raw_origin
+            return "commentary", raw_origin
         if any(h in name for h in _SLICE_HINT):
             return AUTHOR_VOICE_REPOST, raw_origin
         # 不是切片号、也不是已知解说号 —— 归属不明确，宁可标 unknown 让人复核
         return "unknown", raw_origin
+    # B 站：账号名含「切片」的一律按切片号处理（旧 ORIGIN_MAP 曾漏判 11 条）。
+    # 注意只认「切片」二字 —— 不能套用 _SLICE_HINT，因为里面有「路飞」，
+    # 会把「自己造船的路飞」这个官方号也降级成切片（踩过）。
+    if "切片" in (author or ""):
+        return AUTHOR_VOICE_REPOST, raw_origin
     return raw_origin, raw_origin
 
 
@@ -227,7 +246,7 @@ def process_file(path, terms):
     plat = d.get("platform", "bilibili")
     mapped_author, mapped_origin = ORIGIN_MAP.get(vid, (None, "unknown"))
     author = d.get("author") or mapped_author
-    origin, channel_origin = resolve_origin(plat, author, d, mapped_origin)
+    origin, channel_origin = resolve_origin(plat, author, vid, d, mapped_origin)
     rows, ncorr = [], 0
     for i, m in enumerate(merged, 1):
         raw = m["text"]

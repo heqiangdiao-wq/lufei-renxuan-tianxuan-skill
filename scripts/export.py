@@ -18,7 +18,9 @@ os.makedirs(CLEAN, exist_ok=True)
 
 ORIGIN_LABEL = {"author_voice": "作者原声",
                 "author_voice_repost": "作者原声·切片号搬运",
-                "third_party": "第三方解读",
+                "repost_read": "他人朗读原文",
+                "commentary": "他人解读评论",
+                "third_party": "第三方（旧值·待细分）",
                 "unknown": "来源待确认"}
 
 
